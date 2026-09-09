@@ -1,0 +1,100 @@
+name: Build adblock.dat & ehentai.dat
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # 每天 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:      # 支持手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Clone domain-list-community
+        run: |
+          git clone --depth=1 https://github.com/v2fly/domain-list-community.git
+          cd domain-list-community
+          go mod download
+
+      # ---------- 生成 adblock.dat ----------
+      - name: Prepare adblock data
+        run: |
+          mkdir -p domain-list-community/data
+          curl -sL "https://raw.githubusercontent.com/217heidai/adblockfilters/main/rules/adblockdns.txt" -o adblockdns.txt
+
+          # 只提取 ||domain^ 格式并转成 domain-list-community 可用的格式
+          grep -E '^\|\|' adblockdns.txt | \
+            sed -E 's/^\|\|//; s/\^.*$//; s/\$.*$//' | \
+            grep -E '^[a-zA-Z0-9.-]+$' | \
+            sort -u | \
+            sed 's/^/domain:/' > domain-list-community/data/adblock
+
+          echo "adblock rules count: $(wc -l < domain-list-community/data/adblock)"
+
+      - name: Build adblock.dat
+        run: |
+          cd domain-list-community
+          go run ./ --datapath=./data --outputname=adblock.dat --outputdir=../
+          sha256sum ../adblock.dat > ../adblock.dat.sha256sum
+
+      # ---------- 生成 ehentai.dat ----------
+      - name: Prepare ehentai data
+        run: |
+          # 清空 data 目录，只保留 ehentai
+          rm -rf domain-list-community/data/*
+          curl -sL "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/ehentai.list" -o ehentai.list
+
+          # +.domain → domain:domain（domain-list-community 默认就是子域名匹配）
+          sed -E 's/^\+\.//' ehentai.list | \
+            grep -vE '^\s*(#|$)' | \
+            sed 's/^/domain:/' > domain-list-community/data/ehentai
+
+          echo "ehentai rules:"
+          cat domain-list-community/data/ehentai
+
+      - name: Build ehentai.dat
+        run: |
+          cd domain-list-community
+          go run ./ --datapath=./data --outputname=ehentai.dat --outputdir=../
+          sha256sum ../ehentai.dat > ../ehentai.dat.sha256sum
+
+      # ---------- 发布到 Releases（只保留 latest） ----------
+      - name: Delete old latest release (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+
+      - name: Create new latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest
+          body: |
+            Auto-generated daily.
+
+            - **adblock.dat** → `geosite:adblock` 或 `ext:adblock.dat:adblock`
+            - **ehentai.dat** → `geosite:ehentai` 或 `ext:ehentai.dat:ehentai`
+
+            Source:
+            - adblock: https://raw.githubusercontent.com/217heidai/adblockfilters/main/rules/adblockdns.txt
+            - ehentai: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/ehentai.list
+          files: |
+            adblock.dat
+            adblock.dat.sha256sum
+            ehentai.dat
+            ehentai.dat.sha256sum
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
